@@ -1,0 +1,431 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/example/gpsmock
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "GpsMock"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.gpsmock'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.example.gpsmock'
+                  minSdk 24
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+                  encoding 'UTF-8'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_MOCK_LOCATION" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="GPS Mock">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".MockService"
+                      android:exported="false" />
+
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/gpsmock/MainActivity.java <<'EOF'
+          package com.example.gpsmock;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.location.Criteria;
+          import android.location.LocationManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.text.InputType;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+
+              private EditText latBox;
+              private EditText lngBox;
+              private TextView status;
+              private SharedPreferences prefs;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  prefs = getSharedPreferences("gpsmock", MODE_PRIVATE);
+
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      requestPermissions(new String[] {
+                              Manifest.permission.ACCESS_FINE_LOCATION,
+                              Manifest.permission.POST_NOTIFICATIONS
+                      }, 1);
+                  }
+
+                  int pad = (int) (16 * getResources().getDisplayMetrics().density);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(pad, pad * 2, pad, pad);
+
+                  TextView title = new TextView(this);
+                  title.setText("GPS Mock");
+                  title.setTextSize(24);
+                  root.addView(title);
+
+                  latBox = makeBox("Latitude (-90 ถึง 90)", prefs.getString("lat", "13.7563"));
+                  lngBox = makeBox("Longitude (-180 ถึง 180)", prefs.getString("lng", "100.5018"));
+                  root.addView(latBox);
+                  root.addView(lngBox);
+
+                  Button start = new Button(this);
+                  start.setText("เริ่มจำลองตำแหน่ง");
+                  start.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          startMock();
+                      }
+                  });
+                  root.addView(start);
+
+                  Button stop = new Button(this);
+                  stop.setText("หยุดจำลอง");
+                  stop.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          stopService(new Intent(MainActivity.this, MockService.class));
+                          status.setText("หยุดจำลองแล้ว");
+                      }
+                  });
+                  root.addView(stop);
+
+                  Button dev = new Button(this);
+                  dev.setText("เปิดตัวเลือกนักพัฒนา");
+                  dev.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          openDevSettings();
+                      }
+                  });
+                  root.addView(dev);
+
+                  status = new TextView(this);
+                  status.setPadding(0, pad, 0, 0);
+                  status.setText("ยังไม่ได้เริ่ม");
+                  root.addView(status);
+
+                  setContentView(root);
+              }
+
+              private EditText makeBox(String hint, String value) {
+                  EditText e = new EditText(this);
+                  e.setHint(hint);
+                  e.setText(value);
+                  e.setSingleLine(true);
+                  e.setInputType(InputType.TYPE_CLASS_NUMBER
+                          | InputType.TYPE_NUMBER_FLAG_DECIMAL
+                          | InputType.TYPE_NUMBER_FLAG_SIGNED);
+                  return e;
+              }
+
+              private void startMock() {
+                  double lat;
+                  double lng;
+                  try {
+                      lat = Double.parseDouble(latBox.getText().toString().trim());
+                      lng = Double.parseDouble(lngBox.getText().toString().trim());
+                  } catch (NumberFormatException e) {
+                      toast("กรอกพิกัดเป็นตัวเลขให้ถูกต้อง");
+                      return;
+                  }
+                  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+                      toast("พิกัดอยู่นอกช่วงที่ถูกต้อง");
+                      return;
+                  }
+                  if (!canMock()) {
+                      status.setText("ยังไม่ได้ตั้งแอปนี้เป็นแอปตำแหน่งจำลอง");
+                      toast("ในตัวเลือกนักพัฒนา เลือกแอปตำแหน่งจำลอง แล้วเลือก GPS Mock");
+                      openDevSettings();
+                      return;
+                  }
+
+                  prefs.edit()
+                          .putString("lat", String.valueOf(lat))
+                          .putString("lng", String.valueOf(lng))
+                          .apply();
+
+                  Intent i = new Intent(this, MockService.class);
+                  i.putExtra("lat", lat);
+                  i.putExtra("lng", lng);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      startForegroundService(i);
+                  } else {
+                      startService(i);
+                  }
+                  status.setText("กำลังจำลองตำแหน่ง: " + lat + ", " + lng);
+              }
+
+              private boolean canMock() {
+                  LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
+                  String p = LocationManager.GPS_PROVIDER;
+                  try {
+                      try {
+                          lm.removeTestProvider(p);
+                      } catch (Exception ignored) {
+                      }
+                      lm.addTestProvider(p, false, false, false, false, true, true, true,
+                              Criteria.POWER_LOW, Criteria.ACCURACY_FINE);
+                      lm.removeTestProvider(p);
+                      return true;
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              private void openDevSettings() {
+                  try {
+                      startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+                  } catch (Exception e) {
+                      toast("เปิดตัวเลือกนักพัฒนาในการตั้งค่าด้วยตัวเอง");
+                  }
+              }
+
+              private void toast(String msg) {
+                  Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/gpsmock/MockService.java <<'EOF'
+          package com.example.gpsmock;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.location.Criteria;
+          import android.location.Location;
+          import android.location.LocationManager;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.SystemClock;
+
+          public class MockService extends Service {
+
+              private static final String CHANNEL_ID = "gpsmock";
+              private static final String[] PROVIDERS = {
+                      LocationManager.GPS_PROVIDER,
+                      LocationManager.NETWORK_PROVIDER
+              };
+
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private LocationManager lm;
+              private double lat;
+              private double lng;
+              private boolean running = false;
+
+              private final Runnable tick = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (!running) {
+                          return;
+                      }
+                      push();
+                      handler.postDelayed(this, 1000);
+                  }
+              };
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  lm = (LocationManager) getSystemService(LOCATION_SERVICE);
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent == null) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  lat = intent.getDoubleExtra("lat", 0);
+                  lng = intent.getDoubleExtra("lng", 0);
+                  showNotification();
+                  handler.removeCallbacks(tick);
+                  for (String p : PROVIDERS) {
+                      addProvider(p);
+                  }
+                  running = true;
+                  handler.post(tick);
+                  return START_NOT_STICKY;
+              }
+
+              private void showNotification() {
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                  Notification.Builder b;
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      nm.createNotificationChannel(new NotificationChannel(
+                              CHANNEL_ID, "GPS Mock", NotificationManager.IMPORTANCE_LOW));
+                      b = new Notification.Builder(this, CHANNEL_ID);
+                  } else {
+                      b = new Notification.Builder(this);
+                  }
+                  b.setContentTitle("GPS Mock กำลังทำงาน")
+                          .setContentText(lat + ", " + lng)
+                          .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                          .setOngoing(true);
+                  startForeground(1, b.build());
+              }
+
+              private void addProvider(String p) {
+                  try {
+                      try {
+                          lm.removeTestProvider(p);
+                      } catch (Exception ignored) {
+                      }
+                      lm.addTestProvider(p, false, false, false, false, true, true, true,
+                              Criteria.POWER_LOW, Criteria.ACCURACY_FINE);
+                      lm.setTestProviderEnabled(p, true);
+                  } catch (Exception ignored) {
+                  }
+              }
+
+              private Location build(String provider) {
+                  Location l = new Location(provider);
+                  l.setLatitude(lat);
+                  l.setLongitude(lng);
+                  l.setAltitude(10);
+                  l.setAccuracy(5f);
+                  l.setSpeed(0f);
+                  l.setBearing(0f);
+                  l.setTime(System.currentTimeMillis());
+                  l.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
+                  return l;
+              }
+
+              private void push() {
+                  for (String p : PROVIDERS) {
+                      try {
+                          lm.setTestProviderLocation(p, build(p));
+                      } catch (Exception e) {
+                          addProvider(p);
+                          try {
+                              lm.setTestProviderLocation(p, build(p));
+                          } catch (Exception ignored) {
+                          }
+                      }
+                  }
+              }
+
+              @Override
+              public void onDestroy() {
+                  running = false;
+                  handler.removeCallbacks(tick);
+                  for (String p : PROVIDERS) {
+                      try {
+                          lm.removeTestProvider(p);
+                      } catch (Exception ignored) {
+                      }
+                  }
+                  stopForeground(true);
+                  super.onDestroy();
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GpsMock-apk
+          path: app/build/outputs/apk/debug/*.apk
